@@ -30,20 +30,65 @@ class Sensor {
 
 class RawData {
 	
-	RawData(double raw_value, long time) {
+	RawData(double raw_value, long timestamp) {
 		this.raw_value = raw_value;
-		this.time = time;		
+		this.timestamp = timestamp;		
 	}
 
 	public String toString() {
 		SimpleDateFormat dateFormat = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss");
-		return  dateFormat.format(time) + " " + raw_value;
+		return  dateFormat.format(timestamp) + " " + raw_value;
+	}
+	
+	private boolean in_range(long start, long end) {
+		return timestamp >= start && timestamp <= end;
+	}
+	
+	static List<RawData> FilterByDate(List<RawData> data, long start, long end) {
+		List<RawData> RawDataList = new LinkedList <RawData>();
+		for (RawData sample : data ) {
+			if(sample.in_range(start, end)) {
+				RawDataList.add(sample);
+			}
+			
+		}
+		return RawDataList;
 	}
  	
 	double raw_value;
-	long time;
+	long timestamp;
 }
 
+
+class Calibration {
+	
+	Calibration(double measured_bg, long timestamp) {
+		this.measured_bg = measured_bg;
+		this.timestamp = timestamp;
+	}
+	
+	public String toString() {
+		SimpleDateFormat dateFormat = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss");
+		return  dateFormat.format(timestamp) + " " + measured_bg;
+	}
+	
+	private boolean in_range(long start, long end) {
+		return timestamp >= start && timestamp <= end;
+	}
+	
+	static List<Calibration> FilterByDate(List<Calibration> data, long start, long end) {
+		List<Calibration> RawDataList = new LinkedList <Calibration>();
+		for (Calibration sample : data ) {
+			if(sample.in_range(start, end)) {
+				RawDataList.add(sample);
+			}
+		}
+		return RawDataList;
+	}
+	
+	double measured_bg;
+	long timestamp;
+}
 
 // A simple class to read SensorData from xDrip database
 public class SQLiteJDBC
@@ -51,6 +96,7 @@ public class SQLiteJDBC
 	public static void main( String args[] ) {
 		ReadSensors("export20150814-184324.sqlite");
 		ReadRawBg("export20150814-184324.sqlite");
+		ReadCalibrations("export20150814-184324.sqlite");
 	}
 	public static List<Sensor> ReadSensors(String dbName )
 	{
@@ -107,7 +153,6 @@ public class SQLiteJDBC
 
 				
 				long timestamp = (long)rs.getDouble("timestamp");
-				System.out.println( "timestamp = " + timestamp + " "  + raw);
 				RawData rawData = new RawData(raw, timestamp);
 				System.out.println(rawData);
 				RawDataList.add(rawData);
@@ -120,11 +165,42 @@ public class SQLiteJDBC
 			System.err.println( e.getClass().getName() + ": " + e.getMessage() );
 			System.exit(0);
 		}
-		System.out.println("Sensors read successfully");
+		System.out.println("Rawdata read successfully");
 		return RawDataList;
 	}
 
-	
+	public static List<Calibration> ReadCalibrations(String dbName )
+	{
+		Connection c = null;
+		Statement stmt = null;
+		List<Calibration> Calibrations = new LinkedList <Calibration>();
+		try {
+			Class.forName("org.sqlite.JDBC");
+			c = DriverManager.getConnection("jdbc:sqlite:" + dbName);
+			c.setAutoCommit(false);
+			System.out.println("Opened database successfully");
+
+			stmt = c.createStatement();
+			ResultSet rs = stmt.executeQuery( "SELECT * FROM CALIBRATION;" );
+			while ( rs.next() ) {
+				double measured_bg = rs.getDouble("bg");
+				long timestamp = (long)rs.getDouble("timestamp");
+				Calibration calibration = new Calibration(measured_bg, timestamp);
+				System.out.println(calibration);
+				Calibrations.add(calibration);
+			
+			}
+			rs.close();
+			stmt.close();
+			c.close();
+		} catch ( Exception e ) {
+			System.err.println( e.getClass().getName() + ": " + e.getMessage() );
+			System.exit(0);
+		}
+		System.out.println("Calibrations read successfully");
+		return Calibrations;
+	}
+
 	
 
 }
