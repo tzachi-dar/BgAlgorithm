@@ -1,2 +1,2 @@
-"C:\Program Files\Java\jdk1.8.0_05\bin\javac.exe" SQLiteJDBC.java
-java -classpath ".;sqlite-jdbc-3.8.7.jar" SQLiteJDBC
+"C:\Program Files\Java\jdk1.8.0_05\bin\javac.exe" SQLiteJdbc.java
+java -classpath ".;sqlite-jdbc-3.8.7.jar" SQLiteJdbc

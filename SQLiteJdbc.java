@@ -57,6 +57,10 @@ class RawData {
  	
 	double raw_value;
 	long timestamp;
+	public static RawData getByTime(List<RawData> rawBg, long timeStamp2) {
+		// TODO Auto-generated method stub
+		return null;
+	}
 }
 
 
@@ -90,13 +94,107 @@ class Calibration {
 	long timestamp;
 }
 
+
+// The return type of the algorithm
+class CalibrationParameters {
+	double  slope;
+	double intercept;
+}
+
+// This is the algorithm that we are checking...
+interface BgAlgorithm {
+	CalibrationParameters calcluateInital(Calibration cal1, Calibration cal2, RawData rawData0, long sensorStartTime);
+	
+	CalibrationParameters calcluate(Calibration cal, List<RawData> rawData, long sensorStartTime);
+	
+	// In the future will probably change to something more complicated
+	double errorWeight(double MeasuredBG, double calculatedBg);	
+}
+
+// An example algorithm just to get going...
+class InitialAlgorithm implements BgAlgorithm {
+	public CalibrationParameters calcluateInital(Calibration cal1, Calibration cal2, RawData rawData0, long sensorStartTime) {
+		CalibrationParameters params =  new CalibrationParameters();
+		
+		params.slope = 1.1; // Just a guess
+		params.intercept = (cal1.measured_bg + cal2.measured_bg) / 2 - params.slope * rawData0.raw_value ;
+		return params;
+	}
+	
+	public CalibrationParameters calcluate(Calibration cal, List<RawData> rawData, long sensorStartTime) {
+		CalibrationParameters params =  new CalibrationParameters();
+		
+		params.slope = 0; // Just a guess
+		params.intercept = 120 ;
+		return params;
+	}
+	
+	public double errorWeight(double MeasuredBG, double calculatedBg) {
+		return Math.abs(MeasuredBG - calculatedBg);
+	}
+	
+}
+
+
+class AlgorithmChecker {
+	double checkAlgorithm(List<Sensor> sensors, List<RawData> rawBg, List<Calibration> calibrations, BgAlgorithm algorithm) {
+		
+		double error = 0;
+		
+		for (Sensor sensor: sensors) {
+			long startTime = sensor.started_at;
+			long endTime = sensor.stopped_at;
+			
+			List<RawData>  sensorRawBg = RawData.FilterByDate(rawBg, startTime, endTime);
+			List<Calibration> sensorCalibrations = Calibration.FilterByDate(calibrations, startTime, endTime);
+			
+			error = checkSensor(sensor, sensorRawBg, sensorCalibrations, algorithm);
+			
+		}
+		
+		return error;
+	}
+	
+	double checkSensor(Sensor sensor, List<RawData> rawBg, List<Calibration> calibrations, BgAlgorithm algorithm) {
+		
+		double error = 0;
+		
+		// TODO(tzachi) assert in the case that there are not enough calibratios, or no raw_bg
+		
+		CalibrationParameters calibrationParameters = algorithm.calcluateInital(calibrations.get(0), calibrations.get(1), rawBg.get(0), sensor.started_at);
+		for(int i = 2 ; i < calibrations.size(); i++) {
+			Calibration calibration = calibrations.get(i);
+			long timeStamp = calibration.timestamp;
+			double measuredBg = calibration.measured_bg;
+			
+			RawData rawBgTime = RawData.getByTime(rawBg, timeStamp);
+			double calculatedBg = calibrationParameters.slope * rawBgTime.raw_value + calibrationParameters.intercept;
+			
+			error += algorithm.errorWeight(measuredBg, calculatedBg);
+			
+			calibrationParameters = algorithm.calcluate(calibration, rawBg, sensor.started_at);
+		}
+		
+		return error / (calibrations.size() - 2);
+		
+	}
+	
+}
+
+
+
 // A simple class to read SensorData from xDrip database
-public class SQLiteJDBC
+public class SQLiteJdbc
 {
+
 	public static void main( String args[] ) {
-		ReadSensors("export20150814-184324.sqlite");
-		ReadRawBg("export20150814-184324.sqlite");
-		ReadCalibrations("export20150814-184324.sqlite");
+		List<Sensor> Sensors = ReadSensors("export20150814-184324.sqlite");
+		List<RawData> rawBg = ReadRawBg("export20150814-184324.sqlite");
+		List<Calibration> calibrations = ReadCalibrations("export20150814-184324.sqlite");
+		
+		AlgorithmChecker algorithmChecker = new AlgorithmChecker();
+		algorithmChecker.checkAlgorithm(Sensors, rawBg, calibrations, new InitialAlgorithm());
+		
 	}
 	public static List<Sensor> ReadSensors(String dbName )
 	{
