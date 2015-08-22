@@ -24,7 +24,6 @@ class Sensor {
 	long started_at;
 	long stopped_at;
 	String uuid;
-	
 }
 
 
@@ -54,13 +53,35 @@ class RawData {
 		}
 		return RawDataList;
 	}
- 	
+
+	// This function makes sure that we do not return data that is not far away (more than 12 minutes)
+	// from the time that we wanted
+	private static RawData limitData(RawData raw, long timeStamp) {
+		if (Math.abs(raw.timestamp - timeStamp) > 12* 60000) {
+			// they are too far apart
+			System.err.println("Skiping point because distance is " + (raw.timestamp - timeStamp) / 60000 + " minutes");
+			return null;
+		}
+		return raw;
+		
+	}
+	
+	// Get the last point before the calibration.
+	public static RawData getByTime(List<RawData> rawBg, long timestamp) {
+		RawData rawLast = rawBg.get(0);
+		for(RawData raw : rawBg) {
+			if(raw.timestamp > timestamp) {
+				// We have gone too far, return the previous one
+				return limitData(rawLast, timestamp);
+			}
+			rawLast = raw;
+		}
+		// try returning the last one, we might be over the border but not in much.
+		return limitData(rawLast, timestamp);
+	}
+	
 	double raw_value;
 	long timestamp;
-	public static RawData getByTime(List<RawData> rawBg, long timeStamp2) {
-		// TODO Auto-generated method stub
-		return null;
-	}
 }
 
 
@@ -81,13 +102,23 @@ class Calibration {
 	}
 	
 	static List<Calibration> FilterByDate(List<Calibration> data, long start, long end) {
-		List<Calibration> RawDataList = new LinkedList <Calibration>();
+		List<Calibration> Calibrations = new LinkedList <Calibration>();
 		for (Calibration sample : data ) {
 			if(sample.in_range(start, end)) {
-				RawDataList.add(sample);
+				Calibrations.add(sample);
 			}
 		}
-		return RawDataList;
+		// 2 initial calibrations should be from the same time. If this is not so, very likely someone has used on override
+		// calibration. I'll duplicate the first calibration.	
+		if (Calibrations.size()>=2) {
+			Calibration cal0 = Calibrations.get(0);
+			Calibration cal1 = Calibrations.get(1);
+			if(cal1.timestamp - cal0.timestamp  > 10 * 60000) {
+				System.err.println("Duplicated the first calibration " + cal1 + " " + cal0);
+				Calibrations.add(0, cal0);
+			}
+		}
+		return Calibrations;
 	}
 	
 	double measured_bg;
@@ -99,6 +130,10 @@ class Calibration {
 class CalibrationParameters {
 	double  slope;
 	double intercept;
+	
+	public String toString() {
+		return  "slope = " + slope + " intercept = " + intercept;
+	}
 }
 
 // This is the algorithm that we are checking...
@@ -113,19 +148,28 @@ interface BgAlgorithm {
 
 // An example algorithm just to get going...
 class InitialAlgorithm implements BgAlgorithm {
+	InitialAlgorithm(double initialSlope) {
+		this.initialSlope = initialSlope;
+	}
+	
 	public CalibrationParameters calcluateInital(Calibration cal1, Calibration cal2, RawData rawData0, long sensorStartTime) {
 		CalibrationParameters params =  new CalibrationParameters();
 		
-		params.slope = 1.1; // Just a guess
-		params.intercept = (cal1.measured_bg + cal2.measured_bg) / 2 - params.slope * rawData0.raw_value ;
+		Calibration calAverage = new Calibration((cal1.measured_bg + cal2.measured_bg) /2, (cal1.timestamp + cal2.timestamp) /2);
+		
+		params.slope = initialSlope; // Just a guess
+		params.intercept = calAverage.measured_bg  - params.slope * rawData0.raw_value ;
+		
+		System.out.println("cal1 " +cal1 + " cal2 " + cal2 + " rawData0 =" + rawData0 +  "params = " + params);
+		
 		return params;
 	}
 	
 	public CalibrationParameters calcluate(Calibration cal, List<RawData> rawData, long sensorStartTime) {
 		CalibrationParameters params =  new CalibrationParameters();
 		
-		params.slope = 0; // Just a guess
-		params.intercept = 120 ;
+		params.slope = 0; // Just to have a zero value
+		params.intercept = 120 ; // we will always give the second point as 120.
 		return params;
 	}
 	
@@ -133,13 +177,18 @@ class InitialAlgorithm implements BgAlgorithm {
 		return Math.abs(MeasuredBG - calculatedBg);
 	}
 	
+	public String toString() {
+		return  "Algorithm is initialSlope = " + initialSlope;
+	}
+	
+	final double initialSlope;
+	
 }
-
 
 class AlgorithmChecker {
 	double checkAlgorithm(List<Sensor> sensors, List<RawData> rawBg, List<Calibration> calibrations, BgAlgorithm algorithm) {
 		
-		double error = 0;
+		double totalError = 0;
 		
 		for (Sensor sensor: sensors) {
 			long startTime = sensor.started_at;
@@ -148,35 +197,62 @@ class AlgorithmChecker {
 			List<RawData>  sensorRawBg = RawData.FilterByDate(rawBg, startTime, endTime);
 			List<Calibration> sensorCalibrations = Calibration.FilterByDate(calibrations, startTime, endTime);
 			
-			error = checkSensor(sensor, sensorRawBg, sensorCalibrations, algorithm);
+			totalError += checkSensor(sensor, sensorRawBg, sensorCalibrations, algorithm);
 			
 		}
 		
-		return error;
+		double averageError = totalError / sensors.size() ;
+		
+		System.out.println("*** Average error for " + algorithm + " algorithm is " + averageError );
+		return averageError;
 	}
 	
 	double checkSensor(Sensor sensor, List<RawData> rawBg, List<Calibration> calibrations, BgAlgorithm algorithm) {
+		System.out.println("\n Checking sensor! " + sensor+ " calibrations.size() = " + calibrations.size());
 		
+		if(calibrations.size() < 2 || rawBg.size() < 10) {
+			System.err.println("We are ignoring this sensor since we don't have enough data for it");
+			return 0;
+		}
+		System.out.println(" rawBg.size() = " + rawBg.size() + " first raw " + rawBg.get(0) + " last raw " +rawBg.get(rawBg.size() - 1));
 		double error = 0;
 		
-		// TODO(tzachi) assert in the case that there are not enough calibratios, or no raw_bg
+		RawData rawBgTime = RawData.getByTime(rawBg, calibrations.get(0).timestamp);
+		if (rawBgTime == null) {
+			// We did not find a close enough point, so we simply ignore this sensor
+			// TODO (tzachi) don't ignore this sensor
+			System.err.println("We are ignoring this sensor because of problems with inital calibrations (fix me)");
+			return 0;
+		}
 		
-		CalibrationParameters calibrationParameters = algorithm.calcluateInital(calibrations.get(0), calibrations.get(1), rawBg.get(0), sensor.started_at);
-		for(int i = 2 ; i < calibrations.size(); i++) {
+		int numberOfSensors = 0;
+		
+		CalibrationParameters calibrationParameters = algorithm.calcluateInital(calibrations.get(0), calibrations.get(1), rawBgTime, sensor.started_at);
+		for(int i = 2 ; i < /* ?????? */ Math.min(calibrations.size(),  3); i++) {
 			Calibration calibration = calibrations.get(i);
 			long timeStamp = calibration.timestamp;
 			double measuredBg = calibration.measured_bg;
 			
-			RawData rawBgTime = RawData.getByTime(rawBg, timeStamp);
+			rawBgTime = RawData.getByTime(rawBg, timeStamp);
+			if (rawBgTime == null) {
+				// We did not find a close enough point, so we simply ignore this calibration
+				System.err.println("We are ignoring this calibration since we did not find data to match it.");
+				continue;
+			}
 			double calculatedBg = calibrationParameters.slope * rawBgTime.raw_value + calibrationParameters.intercept;
 			
+			System.out.println("Calibration measurment: calibration: " + calibration + " rawBgTime: " + rawBgTime + " calculatedBg:" + calculatedBg);
+			
 			error += algorithm.errorWeight(measuredBg, calculatedBg);
+			numberOfSensors += 1;
 			
 			calibrationParameters = algorithm.calcluate(calibration, rawBg, sensor.started_at);
 		}
 		
-		return error / (calibrations.size() - 2);
+		double averageError = error / numberOfSensors;
 		
+		System.out.println("Average error for this sensor is + " + averageError);
+		return averageError;
 	}
 	
 }
@@ -188,12 +264,20 @@ public class SQLiteJdbc
 {
 
 	public static void main( String args[] ) {
-		List<Sensor> Sensors = ReadSensors("export20150814-184324.sqlite");
-		List<RawData> rawBg = ReadRawBg("export20150814-184324.sqlite");
-		List<Calibration> calibrations = ReadCalibrations("export20150814-184324.sqlite");
+		
+		if(args.length != 1) {
+			System.err.println("usage of program is: java -classpath \".;sqlite-jdbc-3.8.7.jar\" SQLiteJdbc dbname" );
+			return;
+		}
+	
+		List<Sensor> Sensors = ReadSensors(args[0]);
+		List<RawData> rawBg = ReadRawBg(args[0]);
+		List<Calibration> calibrations = ReadCalibrations(args[0]);
 		
 		AlgorithmChecker algorithmChecker = new AlgorithmChecker();
-		algorithmChecker.checkAlgorithm(Sensors, rawBg, calibrations, new InitialAlgorithm());
+		for(double slope = 0.2; slope < 2.0 ; slope += 0.05) {
+			algorithmChecker.checkAlgorithm(Sensors, rawBg, calibrations, new InitialAlgorithm(slope));
+		}
 		
 	}
 	public static List<Sensor> ReadSensors(String dbName )
@@ -220,7 +304,7 @@ public class SQLiteJdbc
 				// TODO(tzachi) Fix the old sensor read time based on new sensor start time.
 				Sensor sensor = new Sensor(started_at, stopped_at, uuid);
 				Sensors.add(sensor);
-				System.out.println(sensor);
+				//System.out.println(sensor);
 			}
 			rs.close();
 			stmt.close();
@@ -252,7 +336,7 @@ public class SQLiteJdbc
 				
 				long timestamp = (long)rs.getDouble("timestamp");
 				RawData rawData = new RawData(raw, timestamp);
-				System.out.println(rawData);
+				//System.out.println(rawData);
 				RawDataList.add(rawData);
 			
 			}
@@ -284,7 +368,7 @@ public class SQLiteJdbc
 				double measured_bg = rs.getDouble("bg");
 				long timestamp = (long)rs.getDouble("timestamp");
 				Calibration calibration = new Calibration(measured_bg, timestamp);
-				System.out.println(calibration);
+				//System.out.println(calibration);
 				Calibrations.add(calibration);
 			
 			}
@@ -296,6 +380,9 @@ public class SQLiteJdbc
 			System.exit(0);
 		}
 		System.out.println("Calibrations read successfully");
+		
+		// TODO: tzachi (make sure calibrations are sorted by time).
+		
 		return Calibrations;
 	}
 
