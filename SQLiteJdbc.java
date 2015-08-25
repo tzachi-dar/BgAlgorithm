@@ -127,6 +127,7 @@ class Calibration {
 
 
 // The return type of the algorithm
+//FIXME: This should be internal to the algorithm
 class CalibrationParameters {
 	double  slope;
 	double intercept;
@@ -138,12 +139,13 @@ class CalibrationParameters {
 
 // This is the algorithm that we are checking...
 interface BgAlgorithm {
-	CalibrationParameters calcluateInital(Calibration cal1, Calibration cal2, RawData rawData0, long sensorStartTime);
-	
-	CalibrationParameters calcluate(Calibration cal, List<RawData> rawData, long sensorStartTime);
-	
-	// In the future will probably change to something more complicated
-	double errorWeight(double MeasuredBG, double calculatedBg);	
+
+	// Start a new sensor with the given starting time
+	void startSensor(long sensorStartTime);
+	// Pass calibrations and raw data to algorithm, called whenever a new calibration value was received
+	void calibrationReceived(List<Calibration> cal, List<RawData> rawData);
+	// Calculate the BG at time bgTimeStamp, given the raw data.
+	double calculateBG(List<RawData> rawData, long bgTimeStamp);
 }
 
 // An example algorithm just to get going...
@@ -152,37 +154,33 @@ class InitialAlgorithm implements BgAlgorithm {
 		this.initialSlope = initialSlope;
 	}
 	
-	public CalibrationParameters calcluateInital(Calibration cal1, Calibration cal2, RawData rawData0, long sensorStartTime) {
-		CalibrationParameters params =  new CalibrationParameters();
-		
-		Calibration calAverage = new Calibration((cal1.measured_bg + cal2.measured_bg) /2, (cal1.timestamp + cal2.timestamp) /2);
-		
-		params.slope = initialSlope; // Just a guess
-		params.intercept = calAverage.measured_bg  - params.slope * rawData0.raw_value ;
-		
-		System.out.println("cal1 " +cal1 + " cal2 " + cal2 + " rawData0 =" + rawData0 +  "params = " + params);
-		
-		return params;
+	void startSensor(long sensorStartTime) {
+		params = null;
 	}
-	
-	public CalibrationParameters calcluate(Calibration cal, List<RawData> rawData, long sensorStartTime) {
-		CalibrationParameters params =  new CalibrationParameters();
-		
-		params.slope = 0; // Just to have a zero value
-		params.intercept = 120 ; // we will always give the second point as 120.
-		return params;
+
+	void calibrationReceived(List<Calibration> cal, List<RawData> rawData) {
+		if (cal.size()==2) {
+			params =  new CalibrationParameters();
+
+			Calibration calAverage = new Calibration((cal.get(0).measured_bg + cal.get(1).measured_bg) /2, (cal.get(0).timestamp + cal.get(1).timestamp) /2);
+
+			params.slope = initialSlope; // Just a guess
+			params.intercept = calAverage.measured_bg  - params.slope * rawData.get(rawData.size()-1).raw_value;
+		}
 	}
-	
-	public double errorWeight(double MeasuredBG, double calculatedBg) {
-		return Math.abs(MeasuredBG - calculatedBg);
+
+	double calculateBG(List<RawData> rawData, long bgTimeStamp) {
+		RawData rawBgTime = RawData.getByTime(rawData, timeStamp);
+		double calculatedBg = params.slope * rawBgTime.raw_value + params.intercept;
+		return calculatedBg;
 	}
-	
+
 	public String toString() {
 		return  "Algorithm is initialSlope = " + initialSlope;
 	}
 	
 	final double initialSlope;
-	
+	CalibrationParameters params;
 }
 
 class AlgorithmChecker {
@@ -225,33 +223,33 @@ class AlgorithmChecker {
 			return 0;
 		}
 		
-		int numberOfSensors = 0;
+		int numberOfCalibrations = 0;
 		
-		CalibrationParameters calibrationParameters = algorithm.calcluateInital(calibrations.get(0), calibrations.get(1), rawBgTime, sensor.started_at);
-		for(int i = 2 ; i < /* ?????? */ Math.min(calibrations.size(),  3); i++) {
+		List<Calibration> calibHistory = new LinkedList<Calibration>();
+		for(int i = 0 ; i < calibrations.size(); i++) {
 			Calibration calibration = calibrations.get(i);
 			long timeStamp = calibration.timestamp;
 			double measuredBg = calibration.measured_bg;
-			
+			calibHistory.add(calibration);
 			rawBgTime = RawData.getByTime(rawBg, timeStamp);
 			if (rawBgTime == null) {
 				// We did not find a close enough point, so we simply ignore this calibration
 				System.err.println("We are ignoring this calibration since we did not find data to match it.");
 				continue;
 			}
-			double calculatedBg = calibrationParameters.slope * rawBgTime.raw_value + calibrationParameters.intercept;
-			
-			System.out.println("Calibration measurment: calibration: " + calibration + " rawBgTime: " + rawBgTime + " calculatedBg:" + calculatedBg);
-			
-			error += algorithm.errorWeight(measuredBg, calculatedBg);
-			numberOfSensors += 1;
-			
-			calibrationParameters = algorithm.calcluate(calibration, rawBg, sensor.started_at);
+			// Skip error calculation for the first two calibrations
+			if (i>=2) {
+				double calculatedBg = algorithm.calculateBG(rawDataHistory, timeStamp);
+				error += Math.abs(measuredBg - calculatedBg) / measuredBg;
+				numberOfCalibrations++;
+			}
+			// Provide data to algorithm in order to train or adjust paramaters
+			algorithms.calibrationReceived(calibHistory, rawDataHistory);
 		}
+
+		double averageError = error / numberOfCalibrations;
 		
-		double averageError = error / numberOfSensors;
-		
-		System.out.println("Average error for this sensor is + " + averageError);
+		System.out.println("Average MARD error for this sensor is + " + averageError);
 		return averageError;
 	}
 	
