@@ -466,8 +466,16 @@ class xDripAlgorithm implements BgAlgorithm {
 	}
 
 	public double calculateBG(List<RawData> rawData, long bgTimeStamp) {
-		// ?? Apply age adjusting ??
-		double bg = lastCalib.xdrip_slope * rawData.get(rawData.size()-1).raw_value + lastCalib.xdrip_intercept;
+		// Apply age adjusting
+		double raw_data = rawData.get(rawData.size()-1).raw_value;
+		double age_adjusted_raw_value;
+		double adjust_for = (86400000 * 1.9) - (rawData.get(rawData.size()-1).timestamp - startTime);
+		if (adjust_for > 0) {
+			age_adjusted_raw_value = (((.45) * (adjust_for / (86400000 * 1.9))) * raw_data) + raw_data;
+		} else {
+			age_adjusted_raw_value = raw_data;
+		}
+		double bg = lastCalib.xdrip_slope * age_adjusted_raw_value + lastCalib.xdrip_intercept;
 		return bg;
 	}
 }
