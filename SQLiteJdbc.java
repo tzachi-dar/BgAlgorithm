@@ -108,11 +108,14 @@ class RawData {
 
 class Calibration {
 	
-	Calibration(double measured_bg, long timestamp, int sensor_id, double xdrip_dist) {
+	Calibration(double measured_bg, long timestamp, int sensor_id,
+				double xdrip_dist, double xdrip_slope, double xdrip_intercept) {
 		this.measured_bg = measured_bg;
 		this.timestamp = timestamp;
 		this.sensor_id = sensor_id;
 		this.xdrip_dist = xdrip_dist;
+		this.xdrip_slope = xdrip_slope;
+		this.xdrip_intercept = xdrip_intercept;
 	}
 	
 	public String toString() {
@@ -157,7 +160,13 @@ class Calibration {
 	double measured_bg;
 	long timestamp;
 	int sensor_id;
+
+	// These are just used to calculate the performance of xDrip.
+	// Once we have extracted the xdrip algorithm, these can be removed
 	double xdrip_dist;
+	double xdrip_slope;
+	double xdrip_intercept;
+
 }
 
 
@@ -197,7 +206,8 @@ class InitialAlgorithm implements BgAlgorithm {
 		if (cal.size()==2) {
 			params =  new CalibrationParameters();
 
-			Calibration calAverage = new Calibration((cal.get(0).measured_bg + cal.get(1).measured_bg) /2, (cal.get(0).timestamp + cal.get(1).timestamp) /2, cal.get(0).sensor_id, cal.get(0).xdrip_dist);
+			Calibration calAverage = new Calibration((cal.get(0).measured_bg + cal.get(1).measured_bg) /2, (cal.get(0).timestamp + cal.get(1).timestamp) /2, cal.get(0).sensor_id,
+										 cal.get(0).xdrip_dist, cal.get(0).xdrip_slope, cal.get(0).xdrip_intercept);
 
 			params.slope = initialSlope; // Just a guess
 			params.intercept = calAverage.measured_bg  - params.slope * rawData.get(rawData.size()-1).raw_value;
@@ -433,10 +443,39 @@ class LineFitAlgorithm implements BgAlgorithm, Evaluator {
 	}
 }
 
+class xDripAlgorithm implements BgAlgorithm {
+	long startTime;
+
+	Calibration lastCalib;
+
+	xDripAlgorithm() {
+	}
+
+	public String toString() {
+		return  "xDripAlgorithm";
+	}
+
+	public void startSensor(long sensorStartTime) {
+		startTime = sensorStartTime;
+		lastCalib = null;
+	}
+
+	public void calibrationReceived(List<Calibration> cal, List<RawData> rawData) {
+		if (cal.size()==0 || rawData.size()==0) return;
+		lastCalib = cal.get(cal.size()-1);
+	}
+
+	public double calculateBG(List<RawData> rawData, long bgTimeStamp) {
+		// ?? Apply age adjusting ??
+		double bg = lastCalib.xdrip_slope * rawData.get(rawData.size()-1).raw_value + lastCalib.xdrip_intercept;
+		return bg;
+	}
+}
 
 class AlgorithmChecker {
 
-	void plotRaw(List<RawData> rawBg, List<Calibration> calibrations, long sensorStart, String fileName) {
+	void plotRaw(List<RawData> rawBg, List<Calibration> calibrations, List<RawData> calculatedBg, long sensorStart, String fileName) {
+		if (rawBg!=null)
 		try {
 			PrintWriter pw = new PrintWriter(new FileWriter(fileName+"_raw.csv"));
 			for (RawData raw : rawBg) {
@@ -449,6 +488,7 @@ class AlgorithmChecker {
 		{
 			System.err.println( e.getClass().getName() + ": " + e.getMessage() );
 		}
+		if (calibrations!=null)
 		try {
 			PrintWriter pw = new PrintWriter(new FileWriter(fileName+"_calib.csv"));
 			for (Calibration cal : calibrations) {
@@ -461,6 +501,20 @@ class AlgorithmChecker {
 		{
 			System.err.println( e.getClass().getName() + ": " + e.getMessage() );
 		}
+		if (calculatedBg!=null)
+		try {
+			PrintWriter pw = new PrintWriter(new FileWriter(fileName+"_calc.csv"));
+			for (RawData raw : calculatedBg) {
+				// time in days.
+				double timeFromStart = (double)(raw.timestamp - sensorStart) / 60000 / 60 / 24;
+				pw.println(timeFromStart+", "+raw.raw_value);
+			}
+			pw.close();
+		} catch (Exception e)
+		{
+			System.err.println( e.getClass().getName() + ": " + e.getMessage() );
+		}
+
 	}
 
 	double checkAlgorithm(List<Sensor> sensors, List<RawData> rawBg, List<Calibration> calibrations, BgAlgorithm algorithm) {
@@ -473,11 +527,12 @@ class AlgorithmChecker {
 			
 			List<RawData> sensorRawBg = RawData.FilterBySensor(rawBg, sensor.id);
 			List<Calibration> sensorCalibrations = Calibration.FilterBySensor(calibrations, sensor.id);
+			List<RawData> bgCalculated = new LinkedList<RawData>();
 
-			plotRaw(sensorRawBg, sensorCalibrations, startTime, "sensor"+sensor.id);
-
-			double mard = checkSensor(sensor, sensorRawBg, sensorCalibrations, algorithm);
+			double mard = checkSensor(sensor, sensorRawBg, sensorCalibrations, algorithm, bgCalculated);
 			if (mard<0) continue;
+
+			plotRaw(sensorRawBg, sensorCalibrations, bgCalculated, startTime, "sensor"+sensor.id);
 
 			totalError += mard;
 			numValidSensors++;
@@ -489,7 +544,7 @@ class AlgorithmChecker {
 		return averageError;
 	}
 	
-	double checkSensor(Sensor sensor, List<RawData> rawBg, List<Calibration> calibrations, BgAlgorithm algorithm) {
+	double checkSensor(Sensor sensor, List<RawData> rawBg, List<Calibration> calibrations, BgAlgorithm algorithm, List<RawData> bgCalculated) {
 		System.out.println("\n--- Checking sensor ---\n" + sensor+ "\ncalibrations.size() = " + calibrations.size());
 		
 		if (calibrations.size() < 2 || rawBg.size() < 10 || calibrations.size() < sensor.days || sensor.days<3) {
@@ -503,14 +558,28 @@ class AlgorithmChecker {
 		int numberOfCalibrations = 0;
 		algorithm.startSensor(sensor.started_at);
 		
+		bgCalculated.clear();
 		List<Calibration> calibHistory = new LinkedList<Calibration>();
+		List<RawData> rawDataHistory = new LinkedList<RawData>();
+		int rawIndex = 0;
 		for(int i = 0 ; i < calibrations.size(); i++) {
 			Calibration calibration = calibrations.get(i);
 			long timeStamp = calibration.timestamp;
 			double measuredBg = calibration.measured_bg;
 			calibHistory.add(calibration);
 
-			List<RawData> rawDataHistory = RawData.FilterByDate(rawBg, sensor.started_at, timeStamp);
+			// add rawdata that occured before this calibration
+			while (rawIndex<rawBg.size() && rawBg.get(rawIndex).timestamp <= timeStamp) {
+				rawDataHistory.add(rawBg.get(rawIndex));
+				// Calculate the bg with the algorith, we use this to plot the algorithm results
+				if (i>=2) { // only if we already had 2 calibrations
+					double bg = algorithm.calculateBG(rawDataHistory, rawBg.get(rawIndex).timestamp);
+					RawData bgData = new RawData(bg, rawBg.get(rawIndex).timestamp, rawBg.get(rawIndex).sensor_id);
+					bgCalculated.add(bgData);
+				}
+				rawIndex++;
+			}
+			//List<RawData> rawDataHistory = RawData.FilterByDate(rawBg, sensor.started_at, timeStamp);
 			RawData rawBgTime = RawData.getByTime(rawBg, timeStamp);
 			if (rawBgTime == null) {
 				// We did not find a close enough point, so we simply ignore this calibration
@@ -526,6 +595,16 @@ class AlgorithmChecker {
 			}
 			// Provide data to algorithm in order to train or adjust paramaters
 			algorithm.calibrationReceived(calibHistory, rawDataHistory);
+		}
+
+		// add calculated bg until end of sensor
+		while (rawIndex<rawBg.size()) {
+			rawDataHistory.add(rawBg.get(rawIndex));
+			// Calculate the bg with the algorith, we use this to plot the algorithm results
+			double bg = algorithm.calculateBG(rawDataHistory, rawBg.get(rawIndex).timestamp);
+			RawData bgData = new RawData(bg, rawBg.get(rawIndex).timestamp, rawBg.get(rawIndex).sensor_id);
+			bgCalculated.add(bgData);
+			rawIndex++;
 		}
 
 		double averageError = error / numberOfCalibrations;
@@ -558,12 +637,8 @@ public class SQLiteJdbc
 		
 		AlgorithmChecker algorithmChecker = new AlgorithmChecker();
 
-
-		algorithmChecker.checkAlgorithm(Sensors, rawBg, calibrations, new LineFitAlgorithm());
-//		for(double slope = 0.2; slope < 2.0 ; slope += 0.05) {
-	//		algorithmChecker.checkAlgorithm(Sensors, rawBg, calibrations, new InitialAlgorithm(slope));
-		//	break;
-	//	}
+		algorithmChecker.checkAlgorithm(Sensors, rawBg, calibrations, new xDripAlgorithm());
+//		algorithmChecker.checkAlgorithm(Sensors, rawBg, calibrations, new LineFitAlgorithm());
 		
 	}
 	public static void FixSensorsStopTime(List<Sensor> sensors, List<RawData> rawBg, List<Calibration> calibrations) {
@@ -670,8 +745,10 @@ public class SQLiteJdbc
 				double measured_bg = rs.getDouble("bg");
 				long timestamp = (long)rs.getDouble("timestamp");
 				int id = rs.getInt("sensor");
-				double v = rs.getDouble("distance_from_estimate");
-				Calibration calibration = new Calibration(measured_bg, timestamp, id,v);
+				double dist = rs.getDouble("distance_from_estimate");
+				double slope = rs.getDouble("slope");
+				double intercept = rs.getDouble("intercept");
+				Calibration calibration = new Calibration(measured_bg, timestamp, id, dist, slope, intercept);
 				//System.out.println(calibration);
 				Calibrations.add(calibration);
 				//System.out.println(v+" "+measured_bg);
