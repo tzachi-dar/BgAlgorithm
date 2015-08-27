@@ -1,0 +1,13 @@
+Issues I want to achieve from this study:
+
+Better BG algorithm:
+
+This includes:
+
+1) Initial calibration algorithm.
+2) When is the best time to calibrate.
+3) Should we wait 15-20 minutes before applying calibration.
+4) noise values of a sensor.
+5) When is a sensor considered bad.
+6) The liability of the data.
+7) Should values be age adjusted. If yes, how?
