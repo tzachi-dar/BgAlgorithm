@@ -77,7 +77,7 @@ class RawData {
 	// This function makes sure that we do not return data that is not far away (more than 12 minutes)
 	// from the time that we wanted
 	private static RawData limitData(RawData raw, long timeStamp) {
-		if (Math.abs(raw.timestamp - timeStamp) > 12* 60000) {
+		if (Math.abs(raw.timestamp - timeStamp) > 30* 60000) {
 			// they are too far apart
 			System.err.println("Skiping point because distance is " + (raw.timestamp - timeStamp) / 60000 + " minutes");
 			return null;
@@ -555,7 +555,7 @@ class AlgorithmChecker {
 	double checkSensor(Sensor sensor, List<RawData> rawBg, List<Calibration> calibrations, BgAlgorithm algorithm, List<RawData> bgCalculated) {
 		System.out.println("\n--- Checking sensor ---\n" + sensor+ "\ncalibrations.size() = " + calibrations.size());
 		
-		if (calibrations.size() < 2 || rawBg.size() < 10 || calibrations.size() < sensor.days || sensor.days<3) {
+		if (calibrations.size() < 2 || rawBg.size() < 10 || sensor.days<3) {
 			System.err.println("We are ignoring this sensor since we don't have enough data for it");
 			return -1.0;
 		}
