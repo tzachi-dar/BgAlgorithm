@@ -1,8 +1,11 @@
 import java.sql.*;
 import java.text.DecimalFormat;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
+import java.awt.SecondaryLoop;
 import java.io.*;
 
 class Sensor {
@@ -43,6 +46,12 @@ class RawData {
 		this.raw_value = raw_value;
 		this.timestamp = timestamp;
 		this.sensor_id = sensor_id;
+	}
+	
+	RawData(RawData old) {
+		this.raw_value = old.raw_value;
+		this.timestamp = old.timestamp;
+		this.sensor_id = old.sensor_id;
 	}
 
 	public String toString() {
@@ -100,8 +109,31 @@ class RawData {
 		return limitData(rawLast, timestamp);
 	}
 	
+	// This function is called to help fil a gap of points that we are missing.
+	// we have two points, first and last, the distance between them is dist, and we are calculating the i point.
+	// for example, if we have points that are located at place 0,3 their gap is 2, and we will be called to calculate
+	// point 0,1
+	public static RawData CreatePoint(RawData first, RawData last, int gap, int location) {
+		assert location < gap;
+		assert location >=0;
+		assert gap > 0 ;
+		if(first.sensor_id  != last.sensor_id) {
+			System.err.println("Warning, we have a gap that contains 2 sensors.");
+		}
+		
+		double ratio = (location + 1.0) / (gap + 1);
+		RawData ret = new RawData(first.raw_value + ratio * (last.raw_value - first.raw_value),
+				                  (long)(first.timestamp + ratio * (last.timestamp - first.timestamp)),
+				                  last.sensor_id);
+		return ret;
+		
+	}
+	
 	double raw_value;
 	long timestamp;
+	int noise_level; // a number from 0 to 4 like nightscout is using 4 is biggest noise, -1 = failed to calculate
+	double noise_quantity1; // a number representing the noise level (method 1)
+	double noise_quantity2; // a number representing the noise level (method 1)
 	int sensor_id;
 }
 
@@ -191,6 +223,212 @@ interface BgAlgorithm {
 	// Calculate the BG at time bgTimeStamp, given the raw data.
 	public double calculateBG(List<RawData> rawData, long bgTimeStamp);
 }
+
+interface INoiseAlgorithm {
+	public void CalculateNoise(List<RawData> rawData);
+}
+
+
+// This class makes sure that one has points with a difference of 5 minutes in between. If points are missing it uses
+// the average. If points are missing from the start it uses the last existing point.
+// It is needed in order to allow other algorithms to work without caring for the *VERY* dirty details.
+class PointsFiller {
+	
+	// This function will return a list of the packets with size=size. rawData[0] will be the first in time.
+	// the list will end with point rawData.get(location)
+	public static List<RawData> CalculateList(List<RawData> rawData, int location, int size) {
+		System.err.println("CalculateList called rawData.size() = " + rawData.size() + " location = " + location +
+				" size = " + size);
+		for(int k = 0; k < size; k++) {
+			System.err.println("k = " + k + " " + "location = " + (location - k) + " "+ rawData.get(location - k).timestamp / 1000);
+		}
+		if(location >= rawData.size()) {
+			System.err.println("Reading out of list list.size() = " + rawData.size() + " location = " + location);
+			return null;
+		}
+		RawData[] raw_data_array = new RawData[size];
+		//???raw_data_array[size - 1] = rawData.get(location);
+		int data_found = 0; 
+		for(int i = 0 ; i < rawData.size() && location - i >= 0 && data_found < size; i++) {
+			int new_location = size - 1 - DistanceFromTime(rawData.get(location).timestamp, rawData.get(location - i).timestamp);
+			if(new_location < 0) {
+				// point is too far
+				break;
+			}
+			if(raw_data_array[new_location] != null) {
+				// We already have a point at this bucket... too bad
+				System.err.println("we have two points that share the same 5 minutes " + (location - i) + " timestamp = " + (rawData.get(location -i ).timestamp / 1000));
+				continue;
+				//return null;
+			}
+			System.err.println("Setting raw_data_array at location " + new_location);
+			raw_data_array[new_location] = rawData.get(location - i);
+			data_found++;
+		}
+		
+		System.err.println("data_found = " + data_found);
+		if(data_found != size) {
+			// now we have to fill points that are missing
+			int first_good_point = size-1;
+			boolean looking_for_point = false;
+			for(int i = 1 ; i <= size; i++) {
+				if(raw_data_array[size - i] == null) {
+					// we need to calculate this point.
+					looking_for_point = true;
+					continue;
+				} else {
+					if(looking_for_point) {
+						// we have a good point, need to fill the gap...
+						
+						assert first_good_point > size - i;
+						
+						// first_good_point and (size - i) are the two points that we actually have 
+						int gap = first_good_point - (size - i) - 1;
+						System.err.println("closing gap, first_good_point = " + first_good_point + " gap = " + gap + " size - i = " + (size - i));
+						assert gap >= 1;
+						for(int j = 0; j < gap ; j++ ) {
+							System.err.println("closing gap - setting point " + (size - i +1 + j));
+							raw_data_array[size - i +1 + j] = RawData.CreatePoint(raw_data_array[size - i], raw_data_array[first_good_point], gap , j);
+						}
+						
+						// Prepare for the next hole
+						looking_for_point = false;
+						
+					}  
+					first_good_point = size - i;
+					assert looking_for_point == false;
+				}
+				
+				
+			}
+			if (looking_for_point) {
+				// We did not have the first points, so we just fill the gap with the first point we have.
+				System.err.println("closing last gap, first_good_point = " + first_good_point);
+				for(int j = first_good_point - 1; j >= 0; j-- ) {
+					raw_data_array[j] = new RawData(rawData.get(first_good_point));
+					System.err.println("setting point j = " + j + " first_good_point - j = " + (first_good_point - j));
+					raw_data_array[j].timestamp = raw_data_array[first_good_point].timestamp - SAMPLE_TIME * (first_good_point - j);
+				}
+			}
+			
+		}
+		// sanity check
+		for(int k = 0; k < size; k++) {
+			System.err.println("k = " + k + " " + raw_data_array[k].timestamp / 1000);
+			assert raw_data_array[k] != null ;
+		}
+		return new ArrayList<RawData>(Arrays.asList(raw_data_array));		
+	}
+	
+	static int DistanceFromTime(long t1, long t2) {
+		double delta = t1 -t2;
+		return (int) Math.round(delta / SAMPLE_TIME);
+	}
+	final static int SAMPLE_TIME = 300000;
+}
+
+
+class NoiseCalculator implements INoiseAlgorithm {
+
+	private final int NOISE_PERIOD = 10; // in unites of 5 minutes
+	
+	public void CalculateNoise(List<RawData> rawData) {
+		// calculate that inefficiently point by point in order to allow it to work just like in xdrip
+		int i;
+		for (i=10900 ; i < rawData.size(); i++) { //???
+			
+			List<RawData> goodList = PointsFiller.CalculateList(rawData, i, NOISE_PERIOD + 1);
+			// sanity check
+			for(int k = 0; k < NOISE_PERIOD + 1; k++)
+				assert goodList.get(k) != null;
+			
+			// From now and on, we have a list in the size NOISE_PERIOD, and we are interested in the last point
+			CalculateNoise(goodList, NOISE_PERIOD );
+		}
+	}
+	
+	// rawData list of points, should alrady be good. i some point in the list, practicaly, it's last.
+	private void CalculateNoise(List<RawData> rawData, int i) {
+        assert rawData.size() >= i;
+		// Find the list of 10 points that match the same 
+		if(i != NOISE_PERIOD ) {
+			// start trivialy don't calculate if not enough data
+			rawData.get(i).noise_level = -1;
+			assert false;
+			return;
+		}
+
+		for(int k = 0; k < NOISE_PERIOD + 1; k++)
+			assert rawData.get(k) != null;
+		
+		double []diffs = new double[NOISE_PERIOD -1];
+		// the points are [i-9, i]
+		// Are they 5 minutes apart?
+		int k=0;
+		for (int j=i-(NOISE_PERIOD - 1); j <i - 1; j++, k++) {
+			System.err.println("j = " + j);
+			if(!followingReadings(rawData.get(j), rawData.get(j+1))) {
+				rawData.get(i).noise_level = -1;
+				assert false;
+				return;
+			}
+			
+			// calculate the difference vector
+			diffs[k] = rawData.get(j).raw_value - rawData.get(j+1).raw_value;
+			
+		}
+		
+		// now for the score method 1: sum of diff + give a 4x boost for level change:
+		double noiseTotal1 = 0;
+		for(int j=0; j < NOISE_PERIOD - 2; j++) {
+			if(sameDirection(diffs[j], diffs[j+1]) ) {
+				noiseTotal1 += Math.abs(diffs[j]);
+			} else {
+				noiseTotal1 += 4 * Math.abs(diffs[j]);
+			}
+		}
+		System.err.println("i = " + i);
+		rawData.get(i).noise_quantity1 = noiseTotal1 / (NOISE_PERIOD -1);
+		rawData.get(i).noise_level = levelFromTotal(rawData.get(i).noise_quantity1);
+		
+		// now for the score method 2: sum of diff of the diffs. 
+		double noiseTotal2 = 0;
+		for(int j=0; j < NOISE_PERIOD - 2; j++) {
+				noiseTotal2 += Math.abs(diffs[j] - diffs[j+1]);
+		}
+		rawData.get(i).noise_quantity2 = noiseTotal2 / (NOISE_PERIOD -1);
+	}
+	boolean sameDirection(double diff1 , double diff2) {
+		if (diff1 * diff2 > 0) {
+			// to have a positive value, weather they are both true or both false
+			return true;
+		}
+		return false;
+	}
+	
+	int levelFromTotal(double noiseTotal) {
+		if (noiseTotal < 3) return 0;
+		if (noiseTotal < 7) return 1;
+		if (noiseTotal < 12) return 2;
+		if (noiseTotal < 20) return 3;
+		return 4;
+		
+	}
+	
+	private boolean followingReadings(RawData p1, RawData p2) {
+		if (p2.timestamp -  p1.timestamp > 7.5*60000) {
+			// Points are too far away
+			return false;
+		}
+		if (p2.timestamp -  p1.timestamp < 2.5*60000) {
+			// points are too close, how did that happen?
+			return false;
+		}
+		return true;
+	}
+		
+}
+
 
 // An example algorithm just to get going...
 class InitialAlgorithm implements BgAlgorithm {
@@ -480,48 +718,56 @@ class xDripAlgorithm implements BgAlgorithm {
 	}
 }
 
+class NoiseCalcultor {
+	public static void  calculateNoise() {
+		
+	}
+}
+
+
 class AlgorithmChecker {
 
 	void plotRaw(List<RawData> rawBg, List<Calibration> calibrations, List<RawData> calculatedBg, long sensorStart, String fileName) {
 		if (rawBg!=null)
-		try {
-			PrintWriter pw = new PrintWriter(new FileWriter(fileName+"_raw.csv"));
-			for (RawData raw : rawBg) {
-				// time in days.
-				double timeFromStart = (double)(raw.timestamp - sensorStart) / 60000 / 60 / 24;
-				pw.println(timeFromStart+", "+raw.raw_value);
+			try {
+				PrintWriter pw = new PrintWriter(new FileWriter(fileName+"_raw.csv"));
+				for (RawData raw : rawBg) {
+					// time in days.
+					double timeFromStart = (double)(raw.timestamp - sensorStart) / 60000 / 60 / 24;
+					pw.println(timeFromStart + ", "+raw.raw_value + ", " +  raw.noise_quantity1 + ", " + 
+					           raw.noise_quantity2 + ", " + raw.noise_level);
+				}
+				pw.close();
+			} catch (Exception e)
+			{
+				System.err.println( e.getClass().getName() + ": " + e.getMessage() );
 			}
-			pw.close();
-		} catch (Exception e)
-		{
-			System.err.println( e.getClass().getName() + ": " + e.getMessage() );
-		}
 		if (calibrations!=null)
-		try {
-			PrintWriter pw = new PrintWriter(new FileWriter(fileName+"_calib.csv"));
-			for (Calibration cal : calibrations) {
-				// time in days.
-				double timeFromStart = (double)(cal.timestamp - sensorStart) / 60000 / 60 / 24;
-				pw.println(timeFromStart+", "+cal.measured_bg);
+			try {
+				PrintWriter pw = new PrintWriter(new FileWriter(fileName+"_calib.csv"));
+				for (Calibration cal : calibrations) {
+					// time in days.
+					double timeFromStart = (double)(cal.timestamp - sensorStart) / 60000 / 60 / 24;
+					pw.println(timeFromStart+", "+cal.measured_bg);
+				}
+				pw.close();
+			} catch (Exception e)
+			{
+				System.err.println( e.getClass().getName() + ": " + e.getMessage() );
 			}
-			pw.close();
-		} catch (Exception e)
-		{
-			System.err.println( e.getClass().getName() + ": " + e.getMessage() );
-		}
 		if (calculatedBg!=null)
-		try {
-			PrintWriter pw = new PrintWriter(new FileWriter(fileName+"_calc.csv"));
-			for (RawData raw : calculatedBg) {
-				// time in days.
-				double timeFromStart = (double)(raw.timestamp - sensorStart) / 60000 / 60 / 24;
-				pw.println(timeFromStart+", "+raw.raw_value);
+			try {
+				PrintWriter pw = new PrintWriter(new FileWriter(fileName+"_calc.csv"));
+				for (RawData raw : calculatedBg) {
+					// time in days.
+					double timeFromStart = (double)(raw.timestamp - sensorStart) / 60000 / 60 / 24;
+					pw.println(timeFromStart+", "+raw.raw_value);
+				}
+				pw.close();
+			} catch (Exception e)
+			{
+				System.err.println( e.getClass().getName() + ": " + e.getMessage() );
 			}
-			pw.close();
-		} catch (Exception e)
-		{
-			System.err.println( e.getClass().getName() + ": " + e.getMessage() );
-		}
 
 	}
 
@@ -643,6 +889,11 @@ public class SQLiteJdbc
 		List<Calibration> calibrations = ReadCalibrations(args[0]);
 		FixSensorsStopTime(Sensors, rawBg, calibrations);
 		
+		// Calculate the noise first
+		INoiseAlgorithm noiseAlgorithm = new NoiseCalculator();
+		noiseAlgorithm.CalculateNoise(rawBg);
+		
+		
 		AlgorithmChecker algorithmChecker = new AlgorithmChecker();
 
 		algorithmChecker.checkAlgorithm(Sensors, rawBg, calibrations, new xDripAlgorithm());
@@ -673,7 +924,7 @@ public class SQLiteJdbc
 	{
 		Connection c = null;
 		Statement stmt = null;
-		List<Sensor> Sensors = new LinkedList <Sensor>();
+		List<Sensor> Sensors = new ArrayList <Sensor>();
 		try {
 			Class.forName("org.sqlite.JDBC");
 			c = DriverManager.getConnection("jdbc:sqlite:" + dbName);
@@ -708,7 +959,7 @@ public class SQLiteJdbc
 	{
 		Connection c = null;
 		Statement stmt = null;
-		List<RawData> RawDataList = new LinkedList <RawData>();
+		List<RawData> RawDataList = new ArrayList <RawData>();
 		try {
 			Class.forName("org.sqlite.JDBC");
 			c = DriverManager.getConnection("jdbc:sqlite:" + dbName);
@@ -740,7 +991,7 @@ public class SQLiteJdbc
 	{
 		Connection c = null;
 		Statement stmt = null;
-		List<Calibration> Calibrations = new LinkedList <Calibration>();
+		List<Calibration> Calibrations = new ArrayList <Calibration>();
 		try {
 			Class.forName("org.sqlite.JDBC");
 			c = DriverManager.getConnection("jdbc:sqlite:" + dbName);
