@@ -110,13 +110,14 @@ class RawData {
 	}
 	
 	// This function is called to help fil a gap of points that we are missing.
-	// we have two points, first and last, the distance between them is dist, and we are calculating the i point.
+	// we have two points, first and last, the distance between them is gap, and we are calculating the i'th point.
 	// for example, if we have points that are located at place 0,3 their gap is 2, and we will be called to calculate
 	// point 0,1
 	public static RawData CreatePoint(RawData first, RawData last, int gap, int location) {
 		assert location < gap;
 		assert location >=0;
 		assert gap > 0 ;
+                assert first.timestamp < last.timestamp;
 		if(first.sensor_id  != last.sensor_id) {
 			System.err.println("Warning, we have a gap that contains 2 sensors.");
 		}
@@ -229,37 +230,62 @@ interface INoiseAlgorithm {
 }
 
 
-// This class makes sure that one has points with a difference of 5 minutes in between. If points are missing it uses
-// the average. If points are missing from the start it uses the last existing point.
+// This class makes sure that one has a list of points with a difference of 5 minutes in between. If points are missing it 
+// creates a point with the average number. If points are missing from the start it uses a clone of first existing point.
+// If there are duplicate data, that data is removed.
 // It is needed in order to allow other algorithms to work without caring for the *VERY* dirty details.
-class PointsFiller {
-	
-	// This function will return a list of the packets with size=size. rawData[0] will be the first in time.
-	// the list will end with point rawData.get(location)
-	public static List<RawData> CalculateList(List<RawData> rawData, int location, int size) {
+
+class RawDataSmoother {
+
+        // create a smooth list of packets.
+        // the returned list will be in size n, and will work on points smaller or equal to location.
+        // for example, if you have captured 200 good packets (on rawData they are from 0 to 199),
+        // and you call it with location 150, and size 10, you will get back a list of 10 packets
+        // that will be packet 141 - 150 of the original list.
+        // Another example, you have missed a few packets, and you only got packets corrosponding to time:
+        // ..., 103,104,107,108,109,110,  (please note that on the original list, the points you have are having
+        // following numbers.)
+        // so, calling this function with location of point 110, will do the following:
+        // it will return a list of 10 packets, first 2 packets will be a clone of 103.
+        // than point 104. than 2 points will be created that have the average (linear regression) of the points
+        // between 104 and 107. than points 107-110 will be coppied.
+
+
+	public static List<RawData> smoothList(List<RawData> rawData, int location, int size) {
 		System.err.println("CalculateList called rawData.size() = " + rawData.size() + " location = " + location +
 				" size = " + size);
-		for(int k = 0; k < size; k++) {
-			System.err.println("k = " + k + " " + "location = " + (location - k) + " "+ rawData.get(location - k).timestamp / 1000);
+		for(int k = 0; k < size ; k++) {
+                        int current = location - size + 1 +k;
+                        if (current < 0) {
+                            continue;
+                        }
+			System.err.println("k = " + k + " " + "location = " + current + " "+ rawData.get(current).timestamp / 1000 +
+                            " " + rawData.get(current).raw_value);
 		}
 		if(location >= rawData.size()) {
 			System.err.println("Reading out of list list.size() = " + rawData.size() + " location = " + location);
 			return null;
 		}
 		RawData[] raw_data_array = new RawData[size];
-		//???raw_data_array[size - 1] = rawData.get(location);
-		int data_found = 0; 
-		for(int i = 0 ; i < rawData.size() && location - i >= 0 && data_found < size; i++) {
+		
+                // Go over existing packets and store them in an array according to their time.
+                int data_found = 0; 
+
+//??????????? why do we need the data_found < size ???? probably we should look at size???????????
+
+		//for(int i = 0 ; i < rawData.size() && location - i >= 0 && data_found < size; i++) {
+                // we need this strange stoping condition to avoid duplicate points
+                for(int i =0; data_found < size && location - i>=0;i++) {
 			int new_location = size - 1 - DistanceFromTime(rawData.get(location).timestamp, rawData.get(location - i).timestamp);
 			if(new_location < 0) {
-				// point is too far
+				// point is too far in the past
 				break;
 			}
 			if(raw_data_array[new_location] != null) {
 				// We already have a point at this bucket... too bad
-				System.err.println("we have two points that share the same 5 minutes " + (location - i) + " timestamp = " + (rawData.get(location -i ).timestamp / 1000));
+				System.err.println("we have two points that share the same 5 minutes " + (location - i) + " timestamp = " + 
+                                    (rawData.get(location -i ).timestamp / 1000));
 				continue;
-				//return null;
 			}
 			System.err.println("Setting raw_data_array at location " + new_location);
 			raw_data_array[new_location] = rawData.get(location - i);
@@ -272,7 +298,8 @@ class PointsFiller {
 			int first_good_point = size-1;
 			boolean looking_for_point = false;
 			for(int i = 1 ; i <= size; i++) {
-				if(raw_data_array[size - i] == null) {
+                                int current_point = size - i;
+				if(raw_data_array[current_point] == null) {
 					// we need to calculate this point.
 					looking_for_point = true;
 					continue;
@@ -280,22 +307,21 @@ class PointsFiller {
 					if(looking_for_point) {
 						// we have a good point, need to fill the gap...
 						
-						assert first_good_point > size - i;
 						
 						// first_good_point and (size - i) are the two points that we actually have 
-						int gap = first_good_point - (size - i) - 1;
-						System.err.println("closing gap, first_good_point = " + first_good_point + " gap = " + gap + " size - i = " + (size - i));
+						int gap = first_good_point - current_point - 1;
+						System.err.println("closing gap, first_good_point = " + first_good_point + " gap = " + gap + " current_point = " + current_point);
 						assert gap >= 1;
 						for(int j = 0; j < gap ; j++ ) {
-							System.err.println("closing gap - setting point " + (size - i +1 + j));
-							raw_data_array[size - i +1 + j] = RawData.CreatePoint(raw_data_array[size - i], raw_data_array[first_good_point], gap , j);
+							System.err.println("closing gap - setting point " + (current_point +1 + j));
+							raw_data_array[current_point +1 + j] = RawData.CreatePoint(raw_data_array[current_point], raw_data_array[first_good_point], gap , j);
 						}
 						
-						// Prepare for the next hole
+						// so far we have closed all gaps 
 						looking_for_point = false;
 						
 					}  
-					first_good_point = size - i;
+					first_good_point = current_point;
 					assert looking_for_point == false;
 				}
 				
@@ -305,7 +331,7 @@ class PointsFiller {
 				// We did not have the first points, so we just fill the gap with the first point we have.
 				System.err.println("closing last gap, first_good_point = " + first_good_point);
 				for(int j = first_good_point - 1; j >= 0; j-- ) {
-					raw_data_array[j] = new RawData(rawData.get(first_good_point));
+					raw_data_array[j] = new RawData(raw_data_array[first_good_point]);
 					System.err.println("setting point j = " + j + " first_good_point - j = " + (first_good_point - j));
 					raw_data_array[j].timestamp = raw_data_array[first_good_point].timestamp - SAMPLE_TIME * (first_good_point - j);
 				}
@@ -314,7 +340,7 @@ class PointsFiller {
 		}
 		// sanity check
 		for(int k = 0; k < size; k++) {
-			System.err.println("k = " + k + " " + raw_data_array[k].timestamp / 1000);
+			System.err.println("k = " + k + " " + raw_data_array[k].timestamp / 1000 + " " + raw_data_array[k].raw_value);
 			assert raw_data_array[k] != null ;
 		}
 		return new ArrayList<RawData>(Arrays.asList(raw_data_array));		
@@ -335,9 +361,9 @@ class NoiseCalculator implements INoiseAlgorithm {
 	public void CalculateNoise(List<RawData> rawData) {
 		// calculate that inefficiently point by point in order to allow it to work just like in xdrip
 		int i;
-		for (i=10900 ; i < rawData.size(); i++) { //???
+		for (i=0 ; i < 10 /*rawData.size()*/; i++) { //???
 			
-			List<RawData> goodList = PointsFiller.CalculateList(rawData, i, NOISE_PERIOD + 1);
+			List<RawData> goodList = RawDataSmoother.smoothList(rawData, i, NOISE_PERIOD + 1);
 			// sanity check
 			for(int k = 0; k < NOISE_PERIOD + 1; k++)
 				assert goodList.get(k) != null;
