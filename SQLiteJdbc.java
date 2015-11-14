@@ -271,24 +271,29 @@ class RawDataSmoother {
                 // Go over existing packets and store them in an array according to their time.
                 int data_found = 0; 
 
-//??????????? why do we need the data_found < size ???? probably we should look at size???????????
-
-		//for(int i = 0 ; i < rawData.size() && location - i >= 0 && data_found < size; i++) {
-                // we need this strange stoping condition to avoid duplicate points
-                for(int i =0; data_found < size && location - i>=0;i++) {
-			int new_location = size - 1 - DistanceFromTime(rawData.get(location).timestamp, rawData.get(location - i).timestamp);
+                // we need this strange stoping condition to avoid duplicate points causing us to loose data.
+                long lastPointTime = 0;
+                for(int i = 0; data_found < size && location - i>=0;i++) {
+                        int current_point = location - i;
+                        if( (i!=0) && (lastPointTime - rawData.get(current_point).timestamp  < 2.5 *60000)) {
+                            // we have two points that are too close to each other. ignoring this packet.
+                            System.err.println("We have two points that are too close: "+ current_point);
+                            continue;
+                        }
+                        lastPointTime = rawData.get(current_point).timestamp ;
+			int new_location = size - 1 - DistanceFromTime(rawData.get(location).timestamp, rawData.get(current_point).timestamp);
 			if(new_location < 0) {
 				// point is too far in the past
 				break;
 			}
 			if(raw_data_array[new_location] != null) {
 				// We already have a point at this bucket... too bad
-				System.err.println("we have two points that share the same 5 minutes " + (location - i) + " timestamp = " + 
-                                    (rawData.get(location -i ).timestamp / 1000));
+				System.err.println("we have two points that share the same 5 minutes " + (current_point) + " timestamp = " + 
+                                    (rawData.get(current_point ).timestamp / 1000));
 				continue;
 			}
-			System.err.println("Setting raw_data_array at location " + new_location);
-			raw_data_array[new_location] = rawData.get(location - i);
+			System.out.println("Setting raw_data_array at location " + new_location);
+			raw_data_array[new_location] = rawData.get(current_point);
 			data_found++;
 		}
 		

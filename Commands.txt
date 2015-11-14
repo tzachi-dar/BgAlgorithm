@@ -9,4 +9,7 @@ plot[0:5][0:10] "temp\\file.dat"  u 1:2:3 with points palette
 set xrange [0:1]     
 set yrange [0:320]
 
+
+bind '-' 'dx=GPVAL_X_MAX-GPVAL_X_MIN; set xrange [GPVAL_X_MIN-dx:GPVAL_X_MAX-dx]; replot'
+
 plot "sensor45_raw.csv" using 1:2 title 'raw', "sensor45_raw.csv" using 1:3, "sensor45_raw.csv" using 1:4 title 'second direviative'  
